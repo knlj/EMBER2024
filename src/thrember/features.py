@@ -955,7 +955,9 @@ class AuthenticodeSignature(FeatureType):
                 certs = signed_data.certificates
                 if len(certs) > raw_obj["chain_max_depth"]:
                     raw_obj["chain_max_depth"] = len(certs)
-                for cert in certs[:-1]:
+                # Convert CertificateStore to list to enable slicing
+                certs_list = list(certs)
+                for cert in certs_list[:-1]: 
                     if cert.issuer == cert.subject:
                         raw_obj["self_signed"] = 1
 
