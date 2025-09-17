@@ -81,10 +81,14 @@ def read_label_unpack(args):
     return read_label(*args)
 
 
-def read_label_subset(raw_feature_paths: list[Path], nrows: int, label_type: str) -> set:
+def read_label_subset(raw_feature_paths: list[Path], nrows: int, label_type: str, show_progress: bool = True, max_files: int = None) -> set:
     """
     Read the unique labels/tags in the subset
     """
+    # Limit number of files for testing if max_files is specified
+    if max_files is not None:
+        raw_feature_paths = raw_feature_paths[:max_files]
+
     # Distribute the vectorization work
     pool = multiprocessing.Pool()
     argument_iterator = (
@@ -92,13 +96,22 @@ def read_label_subset(raw_feature_paths: list[Path], nrows: int, label_type: str
         for _, raw_features_string in enumerate(raw_feature_iterator(raw_feature_paths))
     )
     label_counts = {}
-    for labels in tqdm.tqdm(pool.imap_unordered(read_label_unpack, argument_iterator), total=nrows):
-        if not isinstance(labels, list):
-            labels = [labels]
-        for label in labels:
-            if label_counts.get(label) is None:
-                label_counts[label] = 0
-            label_counts[label] += 1
+    if show_progress:
+        for labels in tqdm.tqdm(pool.imap_unordered(read_label_unpack, argument_iterator), total=nrows):
+            if not isinstance(labels, list):
+                labels = [labels]
+            for label in labels:
+                if label_counts.get(label) is None:
+                    label_counts[label] = 0
+                label_counts[label] += 1
+    else:
+        for labels in pool.imap_unordered(read_label_unpack, argument_iterator):
+            if not isinstance(labels, list):
+                labels = [labels]
+            for label in labels:
+                if label_counts.get(label) is None:
+                    label_counts[label] = 0
+                label_counts[label] += 1
     return label_counts
 
 
@@ -145,10 +158,14 @@ def vectorize_unpack(args):
     return vectorize(*args)
 
 
-def vectorize_subset(X_path: Path, y_path: Path, raw_feature_paths: list[Path], extractor: PEFeatureExtractor, nrows: int, label_type: str = "label", label_map: dict = {}) -> None:
+def vectorize_subset(X_path: Path, y_path: Path, raw_feature_paths: list[Path], extractor: PEFeatureExtractor, nrows: int, label_type: str = "label", label_map: dict = {}, show_progress: bool = True, max_files: int = None) -> None:
     """
     Vectorize a subset of data and write it to disk
     """
+    # Limit number of files for testing if max_files is specified
+    if max_files is not None:
+        raw_feature_paths = raw_feature_paths[:max_files]
+
     # Create space on disk to write features to
     X = np.memmap(X_path, dtype=np.float32, mode="w+", shape=(nrows, extractor.dim))
     if label_type == "label" or label_type == "family":
@@ -163,11 +180,15 @@ def vectorize_subset(X_path: Path, y_path: Path, raw_feature_paths: list[Path], 
         (irow, raw_features_string, X_path, y_path, extractor, nrows, label_type, label_map)
         for irow, raw_features_string in enumerate(raw_feature_iterator(raw_feature_paths))
     )
-    for _ in tqdm.tqdm(pool.imap_unordered(vectorize_unpack, argument_iterator), total=nrows):
-        pass
+    if show_progress:
+        for _ in tqdm.tqdm(pool.imap_unordered(vectorize_unpack, argument_iterator), total=nrows):
+            pass
+    else:
+        for _ in pool.imap_unordered(vectorize_unpack, argument_iterator):
+            pass
 
 
-def create_vectorized_features(data_dir: Path | str, label_type: str = "label", class_min: int = 10) -> None:
+def create_vectorized_features(data_dir: Path | str, label_type: str = "label", class_min: int = 10, show_progress: bool = True, max_files: int = None) -> None:
     """
     Create feature vectors from raw features and write them to disk
 
@@ -177,6 +198,8 @@ def create_vectorized_features(data_dir: Path | str, label_type: str = "label", 
     class_min - The minimum number of instances of a class in the dataset. Data
                 points belonging to a class with fewer than class_min instances
                 are ignored.
+    show_progress - Whether to display a progress bar during vectorization.
+    max_files - Maximum number of files to process for testing. If None, process all files.
 
     Valid label_types:
     label - malicious/benign (binary)
@@ -197,18 +220,25 @@ def create_vectorized_features(data_dir: Path | str, label_type: str = "label", 
     X_train_path = data_path / "X_train.dat"
     y_train_path = data_path / "y_train.dat"
     train_feature_paths = gather_feature_paths(data_path, "train")
-    train_nrows = sum([1 for fp in train_feature_paths for _ in fp.open()])
 
     X_test_path = data_path / "X_test.dat"
     y_test_path = data_path / "y_test.dat"
     test_feature_paths = gather_feature_paths(data_path, "test")
+
+    # Limit number of files for testing if max_files is specified
+    if max_files is not None:
+        print(f"Limiting to {max_files} files per dataset for testing")
+        train_feature_paths = train_feature_paths[:max_files]
+        test_feature_paths = test_feature_paths[:max_files]
+
+    train_nrows = sum([1 for fp in train_feature_paths for _ in fp.open()])
     test_nrows = sum([1 for fp in test_feature_paths for _ in fp.open()])
 
     # Map string labels/tags to numeric labels
     label_map = {}
     i = 0
     if label_type != "label": # No work needed for the default malicious/benign labels
-        train_label_counts = read_label_subset(train_feature_paths, train_nrows, label_type)
+        train_label_counts = read_label_subset(train_feature_paths, train_nrows, label_type, show_progress, max_files)
 
         # Remove labels/tags that appear fewer than class_min time
         for l, count in train_label_counts.items():
@@ -219,10 +249,10 @@ def create_vectorized_features(data_dir: Path | str, label_type: str = "label", 
                 i += 1
 
     print("Vectorizing training set")
-    vectorize_subset(X_train_path, y_train_path, train_feature_paths, extractor, train_nrows, label_type, label_map)
+    vectorize_subset(X_train_path, y_train_path, train_feature_paths, extractor, train_nrows, label_type, label_map, show_progress, max_files)
 
     if label_type != "label": # No work needed for the default malicious/benign labels
-        test_label_counts = read_label_subset(test_feature_paths, test_nrows, label_type)
+        test_label_counts = read_label_subset(test_feature_paths, test_nrows, label_type, show_progress, max_files)
 
         # Remove labels/tags that appear fewer than class_min time
         for l, count in test_label_counts.items():
@@ -235,14 +265,19 @@ def create_vectorized_features(data_dir: Path | str, label_type: str = "label", 
                 i += 1
 
     print("Vectorizing test set")
-    vectorize_subset(X_test_path, y_test_path, test_feature_paths, extractor, test_nrows, label_type, label_map)
+    vectorize_subset(X_test_path, y_test_path, test_feature_paths, extractor, test_nrows, label_type, label_map, show_progress, max_files)
 
     print("Vectorizing challenge set")
     X_test_path = data_path / "X_challenge.dat"
     y_test_path = data_path / "y_challenge.dat"
     raw_feature_paths = gather_feature_paths(data_path, "challenge")
+
+    # Limit challenge files for testing if max_files is specified
+    if max_files is not None:
+        raw_feature_paths = raw_feature_paths[:max_files]
+
     nrows = sum([1 for fp in raw_feature_paths for _ in fp.open()])
-    vectorize_subset(X_test_path, y_test_path, raw_feature_paths, extractor, nrows)
+    vectorize_subset(X_test_path, y_test_path, raw_feature_paths, extractor, nrows, show_progress=show_progress, max_files=max_files)
 
 
 
